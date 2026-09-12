@@ -122,16 +122,13 @@ export function useTasks() {
     newLevel: 1,
   });
 
-  const { user, isDemo, loading: authLoading, profile, refreshProfile, updateDemoProfile } = useAuth();
+  const { user, isDemo, profile, refreshProfile, updateDemoProfile } = useAuth();
   const { addToast } = useToast();
   const supabase = createClient();
   const configured = isSupabaseConfigured();
 
   // Load tasks
   const loadTasks = useCallback(async () => {
-    // If auth is still determining session, wait before fetching
-    if (authLoading) return;
-
     setLoading(true);
     try {
       if (isDemo || !configured || !user) {
@@ -152,26 +149,31 @@ export function useTasks() {
           .order('created_at', { ascending: false });
 
         if (error) {
-          // If remote request fails, fallback to local tasks instead of breaking UI
-          console.warn('Could not query remote tasks, falling back to local queue:', error.message || error);
-          if (typeof window !== 'undefined') {
-            const stored = localStorage.getItem(DEMO_TASKS_KEY);
-            setTasks(stored ? JSON.parse(stored) : INITIAL_DEMO_TASKS);
+          // Gracefully fall back to demo tasks when tables don't exist
+          if (error.code === 'PGRST205' || error.code === '42P01') {
+            console.warn('Supabase tables not found — falling back to local demo mode. Run the migration SQL in supabase/migrations/001_initial_schema.sql');
+            if (typeof window !== 'undefined') {
+              const stored = localStorage.getItem(DEMO_TASKS_KEY);
+              if (stored) {
+                setTasks(JSON.parse(stored));
+              } else {
+                setTasks(INITIAL_DEMO_TASKS);
+                localStorage.setItem(DEMO_TASKS_KEY, JSON.stringify(INITIAL_DEMO_TASKS));
+              }
+            }
+            return;
           }
-        } else {
-          setTasks(data || []);
+          throw error;
         }
+        setTasks(data || []);
       }
-    } catch (err: unknown) {
-      console.warn('Error loading tasks:', err instanceof Error ? err.message : JSON.stringify(err));
-      if (typeof window !== 'undefined') {
-        const stored = localStorage.getItem(DEMO_TASKS_KEY);
-        setTasks(stored ? JSON.parse(stored) : INITIAL_DEMO_TASKS);
-      }
+    } catch (err) {
+      console.error('Error loading tasks:', err);
     } finally {
       setLoading(false);
     }
-  }, [user, isDemo, authLoading, configured, supabase]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, isDemo, configured]);
 
   useEffect(() => {
     loadTasks();
@@ -227,7 +229,25 @@ export function useTasks() {
         .select()
         .single();
 
-      if (error) throw error;
+      if (error) {
+        if (error.code === 'PGRST205' || error.code === '42P01') {
+          console.warn('Tasks table not found in Supabase — mission stored locally');
+          if (typeof window !== 'undefined') {
+            const current: Task[] = JSON.parse(localStorage.getItem(DEMO_TASKS_KEY) || '[]');
+            localStorage.setItem(
+              DEMO_TASKS_KEY,
+              JSON.stringify([newTask, ...current.filter((t: Task) => t.id !== newTask.id)])
+            );
+          }
+          addToast({
+            type: 'success',
+            title: 'Mission Initialized (Local)',
+            description: 'Stored in local memory cache.',
+          });
+          return;
+        }
+        throw error;
+      }
       if (data) {
         setTasks((prev) => prev.map((t) => (t.id === newTask.id ? data : t)));
       }
@@ -270,7 +290,18 @@ export function useTasks() {
 
     try {
       const { error } = await supabase.from('tasks').update(updates).eq('id', id);
-      if (error) throw error;
+      if (error) {
+        if (error.code === 'PGRST205' || error.code === '42P01') {
+          if (typeof window !== 'undefined') {
+            const current: Task[] = JSON.parse(localStorage.getItem(DEMO_TASKS_KEY) || '[]');
+            const updated = current.map((t) => (t.id === id ? { ...t, ...updates } : t));
+            localStorage.setItem(DEMO_TASKS_KEY, JSON.stringify(updated));
+          }
+          addToast({ type: 'success', title: 'Mission Parameters Updated (Local)' });
+          return;
+        }
+        throw error;
+      }
       addToast({ type: 'success', title: 'Mission Synced with Grid' });
     } catch (err: unknown) {
       loadTasks();
@@ -279,6 +310,56 @@ export function useTasks() {
         title: 'Sync Failed',
         description: err instanceof Error ? err.message : 'Update rejected.',
       });
+    }
+  };
+
+  // Local progression calculation helper
+  const executeLocalProgression = (task: Task) => {
+    if (typeof window !== 'undefined') {
+      const current: Task[] = JSON.parse(localStorage.getItem(DEMO_TASKS_KEY) || '[]');
+      const updated = current.map((t) =>
+        t.id === task.id ? { ...t, is_completed: true, completed_at: new Date().toISOString() } : t
+      );
+      localStorage.setItem(DEMO_TASKS_KEY, JSON.stringify(updated));
+    }
+
+    if (profile) {
+      const levelCalc = calculateLevelUp(
+        profile.level,
+        profile.current_xp,
+        profile.xp_to_next_level,
+        task.xp_reward
+      );
+
+      const categoryKey = task.category;
+
+      updateDemoProfile((prev) => ({
+        ...prev,
+        level: levelCalc.level,
+        current_xp: levelCalc.currentXp,
+        xp_to_next_level: levelCalc.xpToNextLevel,
+        total_xp: prev.total_xp + task.xp_reward,
+        credits: prev.credits + task.credit_reward,
+        current_streak: prev.current_streak + 1,
+        longest_streak: Math.max(prev.longest_streak, prev.current_streak + 1),
+        [categoryKey]: (prev[categoryKey] || 1) + 1,
+      }));
+
+      addToast({
+        type: 'xp',
+        title: `+${task.xp_reward} XP & +${task.credit_reward} ₡`,
+        description: `${task.category.toUpperCase()} attribute amplified!`,
+      });
+
+      if (levelCalc.leveledUp) {
+        setLevelUpData({ isOpen: true, newLevel: levelCalc.level });
+        addToast({
+          type: 'levelup',
+          title: `SYSTEM UPGRADE: LEVEL ${levelCalc.level}!`,
+          description: 'New permissions and Black Market items unlocked!',
+          duration: 7000,
+        });
+      }
     }
   };
 
@@ -295,60 +376,26 @@ export function useTasks() {
     );
 
     if (isDemo || !configured || !user) {
-      // Local progression engine execution
-      if (typeof window !== 'undefined') {
-        const current: Task[] = JSON.parse(localStorage.getItem(DEMO_TASKS_KEY) || '[]');
-        const updated = current.map((t) =>
-          t.id === id ? { ...t, is_completed: true, completed_at: new Date().toISOString() } : t
-        );
-        localStorage.setItem(DEMO_TASKS_KEY, JSON.stringify(updated));
-      }
-
-      if (profile) {
-        const levelCalc = calculateLevelUp(
-          profile.level,
-          profile.current_xp,
-          profile.xp_to_next_level,
-          task.xp_reward
-        );
-
-        const categoryKey = task.category;
-
-        updateDemoProfile((prev) => ({
-          ...prev,
-          level: levelCalc.level,
-          current_xp: levelCalc.currentXp,
-          xp_to_next_level: levelCalc.xpToNextLevel,
-          total_xp: prev.total_xp + task.xp_reward,
-          credits: prev.credits + task.credit_reward,
-          current_streak: prev.current_streak + 1,
-          longest_streak: Math.max(prev.longest_streak, prev.current_streak + 1),
-          [categoryKey]: (prev[categoryKey] || 1) + 1,
-        }));
-
-        addToast({
-          type: 'xp',
-          title: `+${task.xp_reward} XP & +${task.credit_reward} ₡`,
-          description: `${task.category.toUpperCase()} attribute amplified!`,
-        });
-
-        if (levelCalc.leveledUp) {
-          setLevelUpData({ isOpen: true, newLevel: levelCalc.level });
-          addToast({
-            type: 'levelup',
-            title: `SYSTEM UPGRADE: LEVEL ${levelCalc.level}!`,
-            description: 'New permissions and Black Market items unlocked!',
-            duration: 7000,
-          });
-        }
-      }
+      executeLocalProgression(task);
       return;
     }
 
     try {
       // Supabase RPC Anti-Cheat Call
       const { data, error } = await supabase.rpc('complete_task', { task_uuid: id });
-      if (error) throw error;
+      if (error) {
+        if (
+          error.code === 'PGRST202' ||
+          error.code === 'PGRST205' ||
+          error.code === '42883' ||
+          error.code === '42P01'
+        ) {
+          console.warn('complete_task RPC or tasks table missing in Supabase, using local progression:', error.message);
+          executeLocalProgression(task);
+          return;
+        }
+        throw error;
+      }
 
       const res = data as CompleteTaskResponse;
       await refreshProfile();
@@ -394,7 +441,17 @@ export function useTasks() {
 
     try {
       const { error } = await supabase.from('tasks').delete().eq('id', id);
-      if (error) throw error;
+      if (error) {
+        if (error.code === 'PGRST205' || error.code === '42P01') {
+          if (typeof window !== 'undefined') {
+            const current: Task[] = JSON.parse(localStorage.getItem(DEMO_TASKS_KEY) || '[]');
+            localStorage.setItem(DEMO_TASKS_KEY, JSON.stringify(current.filter((t) => t.id !== id)));
+          }
+          addToast({ type: 'success', title: 'Mission Expunged (Local)' });
+          return;
+        }
+        throw error;
+      }
       addToast({ type: 'success', title: 'Mission Expunged' });
     } catch (err: unknown) {
       loadTasks();

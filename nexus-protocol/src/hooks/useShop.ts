@@ -39,14 +39,12 @@ export function useShop() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const { user, isDemo, loading: authLoading, profile, updateDemoProfile, refreshProfile } = useAuth();
+  const { user, isDemo, profile, updateDemoProfile, refreshProfile } = useAuth();
   const { addToast } = useToast();
   const supabase = createClient();
   const configured = isSupabaseConfigured();
 
   const loadData = useCallback(async () => {
-    if (authLoading) return;
-
     setLoading(true);
     try {
       if (isDemo || !configured || !user) {
@@ -61,23 +59,20 @@ export function useShop() {
         }
         setItems(INITIAL_SHOP_ITEMS);
       } else {
-        const { data: shopData, error: shopError } = await supabase.from('shop_items').select('*');
-        if (shopError) {
-          console.warn('Could not load remote shop items, using standard catalog:', shopError.message || shopError);
-          setItems(INITIAL_SHOP_ITEMS);
-        } else if (shopData && shopData.length > 0) {
+        const { data: shopData, error: shopErr } = await supabase.from('shop_items').select('*');
+        if (!shopErr && shopData && shopData.length > 0) {
           setItems(shopData);
         } else {
           setItems(INITIAL_SHOP_ITEMS);
         }
 
-        const { data: invData, error: invError } = await supabase
+        const { data: invData, error: invErr } = await supabase
           .from('inventory')
           .select('*, shop_items(*)')
           .eq('user_id', user.id);
 
-        if (invError) {
-          console.warn('Could not query remote inventory:', invError.message || invError);
+        if (invErr) {
+          console.warn('Supabase inventory query failed (tables may not exist yet) — using local inventory:', invErr.message);
           if (typeof window !== 'undefined') {
             const stored = localStorage.getItem(DEMO_INVENTORY_KEY);
             setInventory(stored ? JSON.parse(stored) : INITIAL_DEMO_INVENTORY);
@@ -86,17 +81,46 @@ export function useShop() {
           setInventory(invData || []);
         }
       }
-    } catch (err: unknown) {
-      console.warn('Error loading shop/inventory:', err instanceof Error ? err.message : JSON.stringify(err));
-      setItems(INITIAL_SHOP_ITEMS);
+    } catch (err) {
+      console.error('Error loading shop/inventory:', err);
     } finally {
       setLoading(false);
     }
-  }, [user, isDemo, authLoading, configured, supabase]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, isDemo, configured]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  const buyItemLocally = (item: ShopItem) => {
+    updateDemoProfile((prev) => ({
+      ...prev,
+      credits: prev.credits - item.price,
+    }));
+
+    const newInvItem: InventoryItem = {
+      id: crypto.randomUUID(),
+      user_id: user?.id || 'demo-agent-007',
+      item_id: item.id,
+      equipped: false,
+      purchased_at: new Date().toISOString(),
+      shop_items: item,
+    };
+
+    const updatedInv = [newInvItem, ...inventory];
+    setInventory(updatedInv);
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(DEMO_INVENTORY_KEY, JSON.stringify(updatedInv));
+    }
+
+    addToast({
+      type: 'purchase',
+      title: 'Acquisition Successful!',
+      description: `Purchased ${item.name} for ${item.price} ₡. Added to inventory.`,
+    });
+    return true;
+  };
 
   const buyItem = async (item: ShopItem) => {
     const credits = profile?.credits ?? 0;
@@ -120,38 +144,23 @@ export function useShop() {
     }
 
     if (isDemo || !configured || !user) {
-      // Deduct credits locally
-      updateDemoProfile((prev) => ({
-        ...prev,
-        credits: prev.credits - item.price,
-      }));
-
-      const newInvItem: InventoryItem = {
-        id: crypto.randomUUID(),
-        user_id: 'demo-agent-007',
-        item_id: item.id,
-        equipped: false,
-        purchased_at: new Date().toISOString(),
-        shop_items: item,
-      };
-
-      const updatedInv = [newInvItem, ...inventory];
-      setInventory(updatedInv);
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(DEMO_INVENTORY_KEY, JSON.stringify(updatedInv));
-      }
-
-      addToast({
-        type: 'purchase',
-        title: 'Acquisition Successful!',
-        description: `Purchased ${item.name} for ${item.price} ₡. Added to inventory.`,
-      });
-      return true;
+      return buyItemLocally(item);
     }
 
     try {
       const { error } = await supabase.rpc('purchase_item', { item_uuid: item.id });
-      if (error) throw error;
+      if (error) {
+        if (
+          error.code === 'PGRST202' ||
+          error.code === 'PGRST205' ||
+          error.code === '42883' ||
+          error.code === '42P01'
+        ) {
+          console.warn('purchase_item RPC not found in Supabase — processing purchase locally:', error.message);
+          return buyItemLocally(item);
+        }
+        throw error;
+      }
 
       await refreshProfile();
       await loadData();
@@ -178,26 +187,30 @@ export function useShop() {
     );
     setInventory(updated);
 
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(DEMO_INVENTORY_KEY, JSON.stringify(updated));
+    }
+
+    const item = updated.find((i) => i.item_id === itemId);
+    addToast({
+      type: 'success',
+      title: item?.equipped ? 'Implant Synchronized' : 'Implant Detached',
+    });
+
     if (isDemo || !configured || !user) {
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(DEMO_INVENTORY_KEY, JSON.stringify(updated));
-      }
-      const item = updated.find((i) => i.item_id === itemId);
-      addToast({
-        type: 'success',
-        title: item?.equipped ? 'Implant Synchronized' : 'Implant Detached',
-      });
       return;
     }
 
-    // Remote update
+    // Remote update attempt
     supabase
       .from('inventory')
-      .update({ equipped: updated.find((i) => i.item_id === itemId)?.equipped })
+      .update({ equipped: item?.equipped })
       .eq('user_id', user.id)
       .eq('item_id', itemId)
-      .then(() => {
-        addToast({ type: 'success', title: 'Implant status updated' });
+      .then(({ error }: { error: unknown }) => {
+        if (error) {
+          console.warn('Could not sync implant state with remote DB:', error);
+        }
       });
   };
 

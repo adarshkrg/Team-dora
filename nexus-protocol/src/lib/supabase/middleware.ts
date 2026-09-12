@@ -39,9 +39,20 @@ export async function updateSession(request: NextRequest) {
       data: { user },
     } = await supabase.auth.getUser();
 
+    const isDemo = request.cookies.get('nexus_demo_active')?.value === 'true';
+
     const pathname = request.nextUrl.pathname;
     const isAuthPage = pathname.startsWith('/login') || pathname.startsWith('/signup');
     const isPublicPage = pathname === '/' || pathname.startsWith('/api') || pathname.includes('.');
+
+    if (isDemo) {
+      if (isAuthPage) {
+        const url = request.nextUrl.clone();
+        url.pathname = '/dashboard';
+        return NextResponse.redirect(url);
+      }
+      return supabaseResponse;
+    }
 
     if (!user && !isAuthPage && !isPublicPage) {
       const url = request.nextUrl.clone();

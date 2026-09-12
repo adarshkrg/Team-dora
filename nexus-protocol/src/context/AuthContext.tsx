@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState, useCallback, type ReactNode } from 'react';
 import { createClient, isSupabaseConfigured } from '@/lib/supabase/client';
-import type { User, Session } from '@supabase/supabase-js';
+import type { User, Session, AuthChangeEvent } from '@supabase/supabase-js';
 import type { Profile } from '@/lib/types';
 
 interface AuthContextType {
@@ -66,11 +66,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!error && data) {
         setProfile(data as Profile);
+      } else if (error) {
+        console.warn('Could not fetch remote profile:', error.message || error);
+        setProfile((prev) => prev || {
+          ...INITIAL_DEMO_PROFILE,
+          id: userId,
+          username: user?.user_metadata?.username || user?.email?.split('@')[0] || 'K41-CYPHER',
+        });
       }
     } catch (e) {
       console.warn('Could not fetch remote profile:', e);
+      setProfile((prev) => prev || {
+        ...INITIAL_DEMO_PROFILE,
+        id: userId,
+        username: user?.user_metadata?.username || user?.email?.split('@')[0] || 'K41-CYPHER',
+      });
     }
-  }, [supabase, configured]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [configured, user]);
 
   const refreshProfile = useCallback(async () => {
     if (isDemo) {
@@ -165,7 +178,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     initAuth();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, newSession) => {
+      async (event: AuthChangeEvent, newSession: Session | null) => {
         setSession(newSession);
         setUser(newSession?.user ?? null);
 
@@ -182,7 +195,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     );
 
     return () => subscription.unsubscribe();
-  }, [supabase, fetchProfile, configured]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchProfile, configured]);
 
   const signUp = async (email: string, password: string, username: string) => {
     if (!configured) {
@@ -200,6 +214,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setProfile(newProf);
       localStorage.setItem(DEMO_PROFILE_STORAGE_KEY, JSON.stringify(newProf));
       localStorage.setItem('nexus_demo_active', 'true');
+      document.cookie = 'nexus_demo_active=true; path=/; max-age=2592000; SameSite=Lax';
       setIsDemo(true);
       setUser({
         id: 'demo-agent-007',
@@ -253,6 +268,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (typeof window !== 'undefined') {
       localStorage.setItem('nexus_demo_active', 'true');
       localStorage.setItem(DEMO_PROFILE_STORAGE_KEY, JSON.stringify(prof));
+      document.cookie = 'nexus_demo_active=true; path=/; max-age=2592000; SameSite=Lax';
     }
     setUser({
       id: 'demo-agent-007',
@@ -267,6 +283,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = async () => {
     if (typeof window !== 'undefined') {
       localStorage.removeItem('nexus_demo_active');
+      document.cookie = 'nexus_demo_active=; path=/; max-age=0; SameSite=Lax';
     }
     setIsDemo(false);
     if (configured) {

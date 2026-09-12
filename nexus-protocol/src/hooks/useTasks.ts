@@ -122,13 +122,16 @@ export function useTasks() {
     newLevel: 1,
   });
 
-  const { user, isDemo, profile, refreshProfile, updateDemoProfile } = useAuth();
+  const { user, isDemo, loading: authLoading, profile, refreshProfile, updateDemoProfile } = useAuth();
   const { addToast } = useToast();
   const supabase = createClient();
   const configured = isSupabaseConfigured();
 
   // Load tasks
   const loadTasks = useCallback(async () => {
+    // If auth is still determining session, wait before fetching
+    if (authLoading) return;
+
     setLoading(true);
     try {
       if (isDemo || !configured || !user) {
@@ -148,15 +151,27 @@ export function useTasks() {
           .eq('user_id', user.id)
           .order('created_at', { ascending: false });
 
-        if (error) throw error;
-        setTasks(data || []);
+        if (error) {
+          // If remote request fails, fallback to local tasks instead of breaking UI
+          console.warn('Could not query remote tasks, falling back to local queue:', error.message || error);
+          if (typeof window !== 'undefined') {
+            const stored = localStorage.getItem(DEMO_TASKS_KEY);
+            setTasks(stored ? JSON.parse(stored) : INITIAL_DEMO_TASKS);
+          }
+        } else {
+          setTasks(data || []);
+        }
       }
-    } catch (err) {
-      console.error('Error loading tasks:', err);
+    } catch (err: unknown) {
+      console.warn('Error loading tasks:', err instanceof Error ? err.message : JSON.stringify(err));
+      if (typeof window !== 'undefined') {
+        const stored = localStorage.getItem(DEMO_TASKS_KEY);
+        setTasks(stored ? JSON.parse(stored) : INITIAL_DEMO_TASKS);
+      }
     } finally {
       setLoading(false);
     }
-  }, [user, isDemo, configured, supabase]);
+  }, [user, isDemo, authLoading, configured, supabase]);
 
   useEffect(() => {
     loadTasks();

@@ -1,4 +1,5 @@
 import { createBrowserClient } from '@supabase/ssr';
+import type { SupabaseClient } from '@supabase/supabase-js';
 
 export const isSupabaseConfigured = () => {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -6,8 +7,19 @@ export const isSupabaseConfigured = () => {
   return Boolean(url && key && !url.includes('your-project-id') && !key.includes('your-supabase-anon-key'));
 };
 
+let browserClient: SupabaseClient | null = null;
+
 export function createClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://placeholder.supabase.co';
   const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || 'placeholder-anon-key';
-  return createBrowserClient(url, key);
+  
+  if (typeof window === 'undefined') {
+    return createBrowserClient(url, key);
+  }
+  
+  if (!browserClient) {
+    browserClient = createBrowserClient(url, key);
+  }
+  return browserClient;
 }
+

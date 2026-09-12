@@ -39,12 +39,14 @@ export function useShop() {
   const [inventory, setInventory] = useState<InventoryItem[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const { user, isDemo, profile, updateDemoProfile, refreshProfile } = useAuth();
+  const { user, isDemo, loading: authLoading, profile, updateDemoProfile, refreshProfile } = useAuth();
   const { addToast } = useToast();
   const supabase = createClient();
   const configured = isSupabaseConfigured();
 
   const loadData = useCallback(async () => {
+    if (authLoading) return;
+
     setLoading(true);
     try {
       if (isDemo || !configured || !user) {
@@ -59,24 +61,38 @@ export function useShop() {
         }
         setItems(INITIAL_SHOP_ITEMS);
       } else {
-        const { data: shopData } = await supabase.from('shop_items').select('*');
-        if (shopData && shopData.length > 0) {
+        const { data: shopData, error: shopError } = await supabase.from('shop_items').select('*');
+        if (shopError) {
+          console.warn('Could not load remote shop items, using standard catalog:', shopError.message || shopError);
+          setItems(INITIAL_SHOP_ITEMS);
+        } else if (shopData && shopData.length > 0) {
           setItems(shopData);
+        } else {
+          setItems(INITIAL_SHOP_ITEMS);
         }
 
-        const { data: invData } = await supabase
+        const { data: invData, error: invError } = await supabase
           .from('inventory')
           .select('*, shop_items(*)')
           .eq('user_id', user.id);
 
-        setInventory(invData || []);
+        if (invError) {
+          console.warn('Could not query remote inventory:', invError.message || invError);
+          if (typeof window !== 'undefined') {
+            const stored = localStorage.getItem(DEMO_INVENTORY_KEY);
+            setInventory(stored ? JSON.parse(stored) : INITIAL_DEMO_INVENTORY);
+          }
+        } else {
+          setInventory(invData || []);
+        }
       }
-    } catch (err) {
-      console.error('Error loading shop/inventory:', err);
+    } catch (err: unknown) {
+      console.warn('Error loading shop/inventory:', err instanceof Error ? err.message : JSON.stringify(err));
+      setItems(INITIAL_SHOP_ITEMS);
     } finally {
       setLoading(false);
     }
-  }, [user, isDemo, configured, supabase]);
+  }, [user, isDemo, authLoading, configured, supabase]);
 
   useEffect(() => {
     loadData();

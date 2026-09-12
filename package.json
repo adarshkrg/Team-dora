@@ -1,0 +1,11 @@
+{
+  "name": "life-rpg-nexus-protocol",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix nexus-protocol run dev",
+    "build": "npm --prefix nexus-protocol run build",
+    "start": "npm --prefix nexus-protocol run start",
+    "lint": "npm --prefix nexus-protocol run lint"
+  }
+}
